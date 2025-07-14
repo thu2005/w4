@@ -1,82 +1,95 @@
 import asyncio
-from manager import ExchangeManager
 import pandas as pd
-import numpy as np
 from crypto import CryptoExchange_WS
 
+# Hàm tính RSI không thay đổi
 async def calculate_rsi_wilder(closes, period=14):
     """Tính RSI theo phương pháp Wilder (giống TradingView)"""
-    delta = pd.Series(closes).diff()
+    series = pd.Series(closes, dtype=float)
+    delta = series.diff()
+    
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     
     avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     
+    # Tránh chia cho 0
+    if avg_loss.iloc[-1] == 0:
+        return 100.0
+        
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
 
-async def monitor_token_rsi(ws, symbol, timeframe="1m"):
-    """Giám sát RSI real-time cho một token"""
-    print(f"Bắt đầu theo dõi {symbol} trên khung {timeframe}...")
+async def monitor_resampled_rsi(ws, symbol, custom_timeframe="15s"):
+    """
+    Giám sát RSI bằng cách lấy dữ liệu giao dịch (trades) và tự tổng hợp (resample)
+    thành các khung thời gian tùy chỉnh.
+    """
+    print(f"Bắt đầu theo dõi {symbol} trên khung tùy chỉnh {custom_timeframe}...")
     
-    # Bước 1: Lấy dữ liệu lịch sử để "mồi" cho việc tính toán
-    try:
-        # Lấy nhiều nến hơn (tối đa 1000) để tăng độ chính xác ban đầu
-        all_candles = await ws.fetch_ohlcv(symbol, timeframe=timeframe, limit=1000)
-        if not all_candles:
-            print(f"Không có dữ liệu lịch sử cho {symbol}, không thể bắt đầu.")
-            return
-        # Chỉ lấy giá đóng cửa
-        closes = [candle[4] for candle in all_candles]
-        print(f"Đã lấy {len(closes)} nến lịch sử cho {symbol}. Bắt đầu theo dõi real-time.")
-    except Exception as e:
-        print(f"Lỗi khi lấy dữ liệu lịch sử cho {symbol}: {e}")
-        return
+    all_trades = []
+    last_candle_timestamp = None
 
-    # Bước 2: Theo dõi real-time
     while True:
         try:
-            # Lấy nến mới nhất qua websocket
-            new_candles = await ws.watch_ohlcv(symbol, timeframe=timeframe)
+            # Bước 1: Lấy dữ liệu giao dịch real-time
+            new_trades = await ws.watch_trades(symbol)
+            if not new_trades:
+                continue
             
-            for candle in new_candles:
-                is_new_candle_formed = candle[0] > all_candles[-1][0]
+            all_trades.extend(new_trades)
 
-                # CHỈ IN KHI NẾN CŨ ĐÃ ĐÓNG VÀ NẾN MỚI HÌNH THÀNH
-                if is_new_candle_formed:
-                    # Nến cũ (all_candles[-1]) đã đóng. Tính và in RSI của nó.
-                    # Dữ liệu `closes` hiện tại đang chứa giá đóng cửa cuối cùng của nến vừa rồi.
-                    if len(closes) > 14:
-                        rsi = await calculate_rsi_wilder(closes)
-                        print(f"--- NẾN {timeframe} ĐÃ ĐÓNG ---")
-                        print(f"{symbol}: RSI-14 = {rsi:.2f} | Thời gian: {pd.to_datetime(all_candles[-1][0], unit='ms')}")
-                    
-                    # Bây giờ mới thêm nến mới vào danh sách
-                    all_candles.append(candle)
-                    closes.append(candle[4])
-                    # Giữ danh sách ở kích thước hợp lý, bỏ nến cũ nhất
-                    if len(closes) > 500:
-                        closes.pop(0)
-                        all_candles.pop(0)
+            # Bước 2: Chuyển đổi và tổng hợp thành nến (OHLCV)
+            df = pd.DataFrame(all_trades)
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = df.set_index('datetime')
+
+            # Tổng hợp (resample)
+            ohlc_df = df['price'].resample(custom_timeframe).ohlc()
+            
+            # Lấp đầy các khoảng trống: nếu 1 giây không có giao dịch, giá của nó sẽ bằng giá của giây trước đó
+            ohlc_df.ffill(inplace=True)
+
+            # Bỏ dòng cuối cùng vì đó là nến đang chạy, chưa đóng
+            closed_candles = ohlc_df.iloc[:-1]
+
+            if closed_candles.empty:
+                continue
+
+            # Bước 3: Kiểm tra xem có nến mới vừa đóng không
+            current_candle_timestamp = closed_candles.index[-1]
+            if last_candle_timestamp is None or current_candle_timestamp > last_candle_timestamp:
                 
-                # Nếu chỉ là cập nhật giá của nến hiện tại, thì chỉ cập nhật, không in
-                elif candle[0] == all_candles[-1][0]:
-                    all_candles[-1] = candle
-                    closes[-1] = candle[4]
+                # Cập nhật timestamp của nến mới nhất
+                last_candle_timestamp = current_candle_timestamp
+                
+                # Lấy danh sách giá đóng cửa
+                closes = closed_candles['close'].dropna().tolist()
+
+                if len(closes) > 14:
+                    rsi = await calculate_rsi_wilder(closes)
+                    print(f"--- NẾN {custom_timeframe} ĐÃ ĐÓNG ---")
+                    # Chuyển đổi timestamp sang múi giờ Việt Nam (fix lỗi tz-naive)
+                    local_timestamp = last_candle_timestamp.tz_localize('UTC').tz_convert('Asia/Ho_Chi_Minh')
+                    print(f"{symbol}: RSI-14 = {rsi:.2f} | Thời gian: {local_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Dọn dẹp bớt dữ liệu cũ để tránh tràn bộ nhớ
+            cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(minutes=30)
+            all_trades = [t for t in all_trades if t['timestamp'] > cutoff.timestamp() * 1000]
 
         except Exception as e:
             print(f"Lỗi theo dõi {symbol}: {str(e)}")
-            await asyncio.sleep(5)  # Đợi và thử lại
+            await asyncio.sleep(5)
 
 async def main():
     # Nhập token và sàn
-    tokens_input = input("Nhập danh sách token (cách nhau bởi dấu phẩy, vd: BTC/USDT,ETH/USDT): ")
+    tokens_input = input("Nhập danh sách token (vd: BTC/USDT,ETH/USDT): ")
     tokens = [t.strip() for t in tokens_input.split(",")]
     
     exchange_name = input("Nhập tên sàn (vd: binanceusdm, bybit): ")
-    timeframe = input("Khung thời gian (mặc định 1m): ") or "1m"
+    timeframe = input("Khung thời gian (vd: 1s, 15s, 30s, 1m): ") or "15s"
     
     # Khởi tạo WebSocket client
     ws = CryptoExchange_WS()
@@ -93,7 +106,7 @@ async def main():
             print(f"Token {token} không tìm thấy trên sàn {exchange_name}")
     
     # Chạy nhiều task monitor cùng lúc
-    tasks = [monitor_token_rsi(ws, token, timeframe) for token in valid_tokens]
+    tasks = [monitor_resampled_rsi(ws, token, timeframe) for token in valid_tokens]
     
     try:
         await asyncio.gather(*tasks)
@@ -101,7 +114,7 @@ async def main():
         print("Đang dừng chương trình...")
     finally:
         if ws.exchange:
-            await ws.close()  # Đóng kết nối websocket khi kết thúc
+            await ws.close()
 
 if __name__ == "__main__":
     # Cài đặt event loop
@@ -109,7 +122,7 @@ if __name__ == "__main__":
         import uvloop
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     except ImportError:
-        if asyncio.get_event_loop_policy().__class__.__name__ == 'WindowsSelectorEventLoopPolicy':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # Bỏ qua lỗi trên Windows
+        pass
     
     asyncio.run(main())
