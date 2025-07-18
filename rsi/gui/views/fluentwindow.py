@@ -140,7 +140,7 @@ class WindowBase(BackgroundAnimationWidget, FramelessMainWindow):
         self.tabBar.removeTab(index)
         self.removeInterface(self.stackedWidget.widget(index))
 
-    async def close_window(self):
+    def close_window(self):
         interfaces = self.stackedWidget.children()
         if interfaces:
             for interface in interfaces:
@@ -148,9 +148,14 @@ class WindowBase(BackgroundAnimationWidget, FramelessMainWindow):
                     # Đảm bảo dừng monitor/worker trước
                     if hasattr(interface, 'rsi_monitor') and interface.rsi_monitor:
                         interface.rsi_monitor.stop()
-                    # Đóng chart async đúng cách
+                    # Đóng chart đúng cách (async hoặc sync)
                     if hasattr(interface, 'chartbox_splitter') and hasattr(interface.chartbox_splitter, 'chart'):
-                        await interface.chartbox_splitter.chart.close()
+                        chart = interface.chartbox_splitter.chart
+                        if hasattr(chart, 'close'):
+                            result = chart.close()
+                            import asyncio
+                            if asyncio.iscoroutine(result):
+                                asyncio.run(result)
         self.hide()
         ThreadPoolExecutor_global.shutdown(wait=True)
         Heavy_ProcessPoolExecutor_global.shutdown(wait=True)

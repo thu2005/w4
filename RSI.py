@@ -21,7 +21,7 @@ class MainWindow(WindowBase):
         super().__init__()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Handle window close event with confirmation dialog"""
+        """Handle window close event with confirmation dialog and synchronous cleanup"""
         quit_msg = QCoreApplication.translate(
             "MainWindow", 
             "To close window click button OK", 
@@ -29,14 +29,67 @@ class MainWindow(WindowBase):
         )
         msg_box = MessageBox("Quit Application?", quit_msg, self.window())
         response = msg_box.exec()
-        
+
         if response:
-            self.close_window()
-            self.deleteLater()
+            # 1. Cleanup async tasks and connections
+            self.cleanup_all_resources()
+
+            # 2. Call parent's close_window if exists
+            if hasattr(self, 'close_window'):
+                try:
+                    asyncio.run(self.close_window())
+                except Exception as e:
+                    print(f"Error during close_window cleanup: {e}")
+
+            # 3. Shutdown thread pools
+            self.shutdown_thread_pools()
+
+            # 4. Close event loop
+            self.close_event_loop()
+
+            # 5. Accept close event
             event.accept()
+
+            # 6. Force quit application
+            QApplication.quit()
         else:
             event.ignore()
 
+    def cleanup_all_resources(self):
+        """Cleanup all resources before closing"""
+        # Cancel all running async tasks
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Cancel all pending tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+
+                # Wait for tasks to complete cancellation
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception as e:
+            print(f"Error cancelling async tasks: {e}")
+
+    def shutdown_thread_pools(self):
+        """Shutdown all thread pools"""
+        # Add your thread pool shutdown code here
+        # Example:
+        # if hasattr(self, 'thread_pool'):
+        #     self.thread_pool.shutdown(wait=True)
+        pass
+
+    def close_event_loop(self):
+        """Close asyncio event loop"""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.stop()
+            if not loop.is_closed():
+                loop.close()
+        except Exception as e:
+            print(f"Error closing event loop: {e}")
 
 def setup_application_info():
     """Setup application information and metadata"""
@@ -100,10 +153,10 @@ def main():
     window = create_main_window(app_info)
     window.show()
 
-    loop = QEventLoop(app)
-    asyncio.set_event_loop(loop)
-    with loop:
-        loop.run_forever()
+    # Force exit when app closes
+    app.aboutToQuit.connect(lambda: os._exit(0))
+    
+    sys.exit(app.exec())
 
 
 if __name__ == '__main__':

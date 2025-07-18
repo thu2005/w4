@@ -1,26 +1,23 @@
-from .crypto import CryptoExchange_WS
+
+import ccxt as Exchange
+
 
 class ExchangeManager:
     def __init__(self):
-        self.map_chart_exchange = {}
+        self._ccxt_instances = {}  # cache for ccxt (REST)
 
-    def set_ws_exchange(self, id_exchange, chart_id, symbol, interval, apikey="", secretkey=""):
-        ws = CryptoExchange_WS().setupEchange(
-            apikey=apikey, secretkey=secretkey, exchange_name=id_exchange
-        )
-        key = f"ws-{chart_id}-{symbol}-{interval}"
-        if key not in self.map_chart_exchange:
-            self.map_chart_exchange[key] = {f"ws-{id_exchange}": ws}
-        else:
-            self.map_chart_exchange[key][f"ws-{id_exchange}"] = ws
-        return ws
-
-    def get_ws_exchange(self, id_exchange, chart_id, symbol, interval):
-        key = f"ws-{chart_id}-{symbol}-{interval}"
-        chart = self.map_chart_exchange.get(key)
-        if chart:
-            return chart.get(f"ws-{id_exchange}")
-        return None
-
-    def clear(self):
-        self.map_chart_exchange.clear()
+    def get_ccxt_instance(self, exchange_name, apikey="", secretkey=""):
+        # exchange_name: e.g. 'binance', 'bybit', ...
+        if exchange_name not in self._ccxt_instances:
+            try:
+                exchange_class = getattr(Exchange, exchange_name)
+                inst = exchange_class({
+                    "apiKey": apikey,
+                    "secret": secretkey
+                })
+                inst.load_markets()
+                self._ccxt_instances[exchange_name] = inst
+            except Exception as e:
+                print(f"[ExchangeManager] Lỗi tạo/lấy markets {exchange_name}: {e}")
+                return None
+        return self._ccxt_instances[exchange_name]

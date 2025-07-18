@@ -2,7 +2,8 @@ from typing import TYPE_CHECKING
 from .mainwidget_ui import Ui_MainWidget
 from rsi.gui.components import CircularProgress
 from rsi.gui.qfluentwidgets.common import FluentStyleSheet
-from PySide6.QtWidgets import QFrame, QWidget
+from PySide6.QtWidgets import QFrame, QWidget, QHBoxLayout, QSizePolicy
+from rsi.gui.components.card_monitor_widget import CardMonitorWidget
 from PySide6.QtCore import Signal, Qt, QEvent, QTime
 from rsi.gui.qfluentwidgets.common.icon import *
 from rsi.appmanager.setting import AppConfig
@@ -33,17 +34,25 @@ class MainWidget(QWidget, Ui_MainWidget):
         self.current_symbol = current_symbol
         self.current_interval = curent_interval  # Lưu interval hiện tại
 
-        self.rsi_monitor = None
-        self.start_rsi_monitor(current_symbol, curent_interval, current_ex)
 
+        # --- Card Monitor Section ---
+        from PySide6.QtWidgets import QWidget, QSizePolicy, QScrollArea, QGridLayout
+        self.card_scroll = QScrollArea()
+        self.card_scroll.setWidgetResizable(True)
+        self.card_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        # Card height ~160, spacing ~30, 2 dòng: (2*160 + 1*30 + top/bottom margin)
+        self.card_scroll.setFixedHeight(2*160 + 1*30 + 2*30)
+        self.card_container = QWidget()
+        self.card_container.setStyleSheet("background: transparent;")
+        self.card_layout = QGridLayout(self.card_container)
+        self.card_layout.setContentsMargins(30, 30, 30, 30)
+        self.card_layout.setSpacing(30)
+        self.card_monitors = {}  # key: unique_key, value: CardMonitorWidget
+        self.card_scroll.setWidget(self.card_container)
+        self.verticalLayout_9.addWidget(self.card_scroll)
 
-        self.chartbox_splitter.setup_chart(
-        self, current_ex, current_symbol, curent_interval
-        )
-
-        self.chartbox_splitter.setup_chart(
-            self, current_ex, current_symbol, curent_interval
-        )
+        # Demo: add first card for current_symbol/current_ex/current_interval
+        self.add_monitor_card(self.current_symbol, self.current_ex, {self.current_interval: '--'})
 
         # KHÔNG gọi asyncio.create_task ở đây để tránh lỗi event loop
         # Nếu muốn cập nhật RSI ban đầu, có thể gọi hàm sync lấy dữ liệu hoặc cập nhật khi có event loop
@@ -82,47 +91,40 @@ class MainWidget(QWidget, Ui_MainWidget):
         self.press_time = None
         self.release_time = None
 
-    def start_rsi_monitor(self, symbol, interval, exchange_id):
-        # Dừng monitor cũ nếu có
-        if self.rsi_monitor:
-            self.rsi_monitor.stop()
-        manager = ExchangeManager()
-        ws_history = manager.set_ws_exchange(exchange_id, "chart1", symbol, interval, apikey="", secretkey="")
-        ws_monitor = manager.set_ws_exchange(exchange_id, "chart1", symbol, interval, apikey="", secretkey="")
+    def add_monitor_card(self, symbol, exchange, rsi_dict):
+        unique_key = f"{symbol}({exchange})"
+        if unique_key in self.card_monitors:
+            # Đã có card, chỉ update giá trị
+            self.card_monitors[unique_key].update_rsi(rsi_dict)
+            return
+        card = CardMonitorWidget(symbol, exchange, rsi_dict, unique_key)
+        card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        card.closeRequested.connect(self.remove_monitor_card)
+        # Tính vị trí dòng/cột
+        n = len(self.card_monitors)
+        row = n // 5
+        col = n % 5
+        self.card_layout.addWidget(card, row, col)
+        self.card_monitors[unique_key] = card
 
-        # Worker chỉ fetch 1500 nến, tính RSI và emit về UI
-        from rsi.appmanager.worker.qthreads import FastWorker
-        def fetch_and_calc_rsi(setdata=None):
-            try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                candles = loop.run_until_complete(ws_history.fetch_ohlcv(symbol, timeframe=interval, limit=1500))
-                closes = [c[4] for c in candles]
-                from rsi.controls.indicator import RSIIndicator
-                rsi = RSIIndicator(14).calculate(closes)
-                if setdata:
-                    setdata.emit(rsi)
-                loop.close()
-            except Exception as e:
-                print(f"[UI] Lỗi lấy RSI lịch sử: {e}")
-                if setdata:
-                    setdata.emit('--')
+    def remove_monitor_card(self, unique_key):
+        card = self.card_monitors.pop(unique_key, None)
+        if card:
+            card.setParent(None)
+            card.deleteLater()
 
-        self.rsi_worker = FastWorker(self, fetch_and_calc_rsi)
-        self.rsi_worker.signals.setdata.connect(self.set_rsi_value)
-        def start_monitor_after_worker():
-            # Sau khi hiển thị RSI đầu tiên, khởi động monitor real-time
-            self.rsi_monitor = RSIMonitor(ws_monitor, symbol, interval, on_rsi_update=self.set_rsi_value)
-            self.rsi_monitor.start()
-        # Worker không có finished signal, nên dùng thread join trong một hàm phụ hoặc callback setdata lần đầu
-        # Đảm bảo chỉ start monitor sau khi setdata đầu tiên
-        def set_rsi_and_start_monitor(value):
-            self.set_rsi_value(value)
-            start_monitor_after_worker()
-            # Ngắt kết nối để không gọi lại nhiều lần
-            self.rsi_worker.signals.setdata.disconnect()
-        self.rsi_worker.signals.setdata.connect(set_rsi_and_start_monitor)
-        self.rsi_worker.start_thread()
+    def update_monitor_card(self, symbol, exchange, interval, value):
+        unique_key = f"{symbol}({exchange})"
+        if unique_key in self.card_monitors:
+            card = self.card_monitors[unique_key]
+            # Luôn truyền giá trị vào mốc '1m', các mốc khác giữ nguyên
+            rsi_dict = card.rsi_dict.copy()
+            rsi_dict['1m'] = value
+            card.update_rsi(rsi_dict)
+
+    # Nếu muốn tự động thêm card khi monitor token mới, có thể gọi add_monitor_card ở các sự kiện đổi symbol/interval
+
+
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -155,14 +157,8 @@ class MainWidget(QWidget, Ui_MainWidget):
         super().mouseReleaseEvent(ev)
 
     def set_rsi_value(self, value):
-        import datetime
-        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[UI] {now} | Token: {self.current_symbol} | Interval: {self.current_interval} | RSI cập nhật: {value}")
-        try:
-            val = float(value)
-            self.rsiLabel.setText(f"RSI: {val:.2f}")
-        except Exception:
-            self.rsiLabel.setText(f"RSI: {value}")
+        # Deprecated: Đã chuyển sang update_monitor_card
+        pass
 
     async def update_rsi(self, symbol, interval, exchange_id):
         manager = ExchangeManager()
@@ -181,7 +177,8 @@ class MainWidget(QWidget, Ui_MainWidget):
         symbol = args[1]
         exchange_id = args[2]
         # Luôn dùng self.current_interval để đảm bảo interval hợp lệ
-        self.start_rsi_monitor(symbol, self.current_interval, exchange_id)
+        # Tự động thêm card nếu chưa có
+        self.add_monitor_card(symbol, exchange_id, {self.current_interval: '--'})
 
     def on_interval_changed(self, args):
         # args: ("change_interval", interval)
@@ -189,4 +186,5 @@ class MainWidget(QWidget, Ui_MainWidget):
         self.current_interval = interval  # Cập nhật interval hiện tại
         symbol = self.topbar.get_current_symbol()
         exchange_id = self.topbar.get_current_exchange()
-        self.start_rsi_monitor(symbol, interval, exchange_id)
+        # Tự động thêm card nếu chưa có
+        self.add_monitor_card(symbol, exchange_id, {interval: '--'})
