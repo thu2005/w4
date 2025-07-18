@@ -17,8 +17,14 @@ class RSIIndicator:
         self.scalar = scalar
 
     def calculate(self, closes):
+        # Khi khởi tạo lần đầu: truyền toàn bộ closes (vd: 1500 nến)
+        # Khi cập nhật realtime: chỉ cần truyền closes[-self.period*5:]
         if len(closes) < self.period:
             return None
+        # Nếu dữ liệu quá dài (realtime update), chỉ lấy length*5 giá trị cuối
+        closes = list(closes)
+        if len(closes) > self.period * 5:
+            closes = closes[-self.period*5:]
         close = pd.Series(closes)
         diff = close.diff(self.drift)
         positive = diff.copy()
@@ -39,7 +45,19 @@ class RSIIndicator:
             pos_avg = rma(positive, self.period)
             neg_avg = rma(negative, self.period)
 
-        rsi = self.scalar * pos_avg / (pos_avg + abs(neg_avg))
+        pos = pos_avg.iloc[-1]
+        neg = abs(neg_avg.iloc[-1])
+        # Nếu pos hoặc neg là NaN (do dữ liệu không hợp lệ), trả về 50 (trung tính)
+        if pd.isna(pos) or pd.isna(neg):
+            return 50.0
+        if pos + neg == 0:
+            rsi_val = 50.0
+        elif neg == 0:
+            rsi_val = 100.0
+        elif pos == 0:
+            rsi_val = 0.0
+        else:
+            rsi_val = self.scalar * pos / (pos + neg)
         if self.offset != 0:
-            rsi = rsi.shift(self.offset)
-        return float(rsi.iloc[-1]) if not rsi.empty else None
+            pass
+        return float(rsi_val)

@@ -32,31 +32,103 @@ class CardMonitorWidget(QFrame):
         self._start_worker_and_monitor()
 
     def _start_worker_and_monitor(self):
-        # Mỗi card tự polling fetch_ohlcv qua ccxt REST, update RSI lên UI
+        # Mô phỏng websocket nếu không có ccxt.pro: chỉ emit khi có nến mới, giảm số lần gọi API
         from rsi.controls.manager import ExchangeManager
         from rsi.appmanager.worker.qthreads import FastWorker
+        import time
+        import math
         manager = ExchangeManager()
         symbol = self.token_name
         exchange_name = self.exchange  # exchange_id là tên sàn: 'binance', 'bybit', ...
         interval = self.interval
         exchange = manager.get_ccxt_instance(exchange_name)
 
+        def is_valid_closes(closes):
+            if len(closes) < 14:
+                return False
+            first = closes[0]
+            for v in closes:
+                if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
+                    return False
+            return not all(x == first for x in closes)
+
+        def is_valid_rsi(rsi):
+            return rsi is not None and isinstance(rsi, (int, float)) and not math.isnan(rsi) and not math.isinf(rsi)
+
         def fetch_and_calc_rsi(setdata=None):
-            import time
+            last_candle_ts = None
+            closes = []
+            first_fetch = True
+            period = 14
+            closes_max = period * 5
             try:
+                first_loop = True
                 while self._is_running:
                     try:
-                        candles = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=150)
-                        closes = [c[4] for c in candles]
-                        from rsi.controls.indicator import RSIIndicator
-                        rsi = RSIIndicator(14).calculate(closes)
-                        if setdata:
-                            setdata.emit(rsi)
+                        if first_fetch:
+                            candles = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=1000)
+                            first_fetch = False
+                            closes = [c[4] for c in candles]  # lấy toàn bộ 1000 closes để warm-up
+                            #print(f"Raw candles: {candles[-20:]}")  # In 20 nến gần nhất
+                            #print(f"Extracted closes: {closes[-20:]}")
+                            #print(f"Valid closes check: len={len(closes)}, all_same={all(c == closes[0] for c in closes)}")
+                            if len(closes) < period:
+                                time.sleep(2)
+                                continue
+                            last_candle_ts = candles[-1][0]
+                            if not is_valid_closes(closes):
+                                if setdata:
+                                    setdata.emit('--')
+                            else:
+                                from rsi.controls.indicator import RSIIndicator
+                                rsi = RSIIndicator(period).calculate(closes)
+                                print(f"RSI calculated: {rsi}")
+                                if is_valid_rsi(rsi) and setdata:
+                                    setdata.emit(rsi)
+                            # Lần đầu tiên: update xong là break ra khỏi vòng lặp để vào sleep đồng bộ
+                            first_loop = False
+                        else:
+                            candles = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=2)
+                            if not candles or len(candles) < 2:
+                                time.sleep(2)
+                                continue
+                            prev_candle, last_candle = candles[-2], candles[-1]
+                            if last_candle[0] != last_candle_ts:
+                                last_candle_ts = last_candle[0]
+                                closes.append(last_candle[4])
+                                if len(closes) > closes_max:
+                                    closes.pop(0)
+                                print(f"Raw candles: {candles}")
+                                print(f"Extracted closes: {closes}")
+                                print(f"Valid closes check: len={len(closes)}, all_same={all(c == closes[0] for c in closes)}")
+                                if is_valid_closes(closes):
+                                    from rsi.controls.indicator import RSIIndicator
+                                    rsi = RSIIndicator(period).calculate(closes)
+                                    print(f"RSI calculated: {rsi}")
+                                    if is_valid_rsi(rsi) and setdata:
+                                        setdata.emit(rsi)
+                                # Nếu không hợp lệ, không emit gì cả
+                            else:
+                                time.sleep(1)
+                                continue
+                        # Sau lần đầu, sleep đến mốc nến tiếp theo
+                        now = int(time.time() * 1000)
+                        candle_ms = last_candle_ts
+                        tf_sec = 60  # default 1m
+                        if isinstance(interval, str):
+                            if interval.endswith('s'):
+                                tf_sec = int(interval[:-1])
+                            elif interval.endswith('m'):
+                                tf_sec = int(interval[:-1]) * 60
+                        # Tính mốc nến tiếp theo chuẩn
+                        next_candle_time = ((candle_ms // (tf_sec * 1000)) + 1) * (tf_sec * 1000)
+                        sleep_time = max(1, (next_candle_time - now) // 1000)
+                        time.sleep(sleep_time)
                     except Exception as e:
                         print(f"[Card] Lỗi fetch_ohlcv {exchange_name} {symbol}: {e}")
                         if setdata:
                             setdata.emit('--')
-                    time.sleep(2)
+                        time.sleep(2)
             except Exception as e:
                 print(f"[Card] Lỗi polling thread: {e}")
 
@@ -113,7 +185,7 @@ class CardMonitorWidget(QFrame):
             # Format value nếu là số, nếu không thì hiển thị nguyên văn
             try:
                 val = float(value)
-                value_str = f"{val:.1f}"
+                value_str = f"{val:.2f}"
             except Exception:
                 value_str = str(value)
             lbl_value = QLabel(value_str)
@@ -143,7 +215,7 @@ class CardMonitorWidget(QFrame):
             if k in self.rsi_value_labels:
                 try:
                     val = float(v)
-                    value_str = f"{val:.1f}"
+                    value_str = f"{val:.2f}"
                 except Exception:
                     value_str = str(v)
                 self.rsi_value_labels[k].setText(value_str)
