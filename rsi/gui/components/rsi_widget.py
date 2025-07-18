@@ -115,7 +115,7 @@ class RSIWidget(QWidget):
         layout.addWidget(title)
         
         # Current RSI value
-        self.rsi_label = QLabel(f"RSI: {self.current_rsi:.2f}")
+        self.rsi_label = QLabel(f"RSI monitoring: {self.current_rsi:.2f}")
         self.rsi_label.setAlignment(Qt.AlignCenter)
         self.rsi_label.setStyleSheet("font-size: 18px; margin: 10px;")
         layout.addWidget(self.rsi_label)
@@ -138,7 +138,7 @@ class RSIWidget(QWidget):
             self.rsi_values.pop(0)
         
         # Update label
-        self.rsi_label.setText(f"RSI: {self.current_rsi:.2f}")
+        self.rsi_label.setText(f"RSI monitoring: {self.current_rsi:.2f}")
         
         # Color based on RSI level
         if self.current_rsi > 70:
@@ -213,7 +213,7 @@ class RSIWidget(QWidget):
             self.rsi_values.pop(0)
         
         # Update UI
-        self.rsi_label.setText(f"RSI: {self.current_rsi:.2f}")
+        self.rsi_label.setText(f"RSI monitoring: {self.current_rsi:.2f}")
         self.chart_area.update()
     
     def update_rsi(self):

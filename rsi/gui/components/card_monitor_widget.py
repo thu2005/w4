@@ -32,14 +32,14 @@ class CardMonitorWidget(QFrame):
         self._start_worker_and_monitor()
 
     def _start_worker_and_monitor(self):
-        # Mô phỏng websocket nếu không có ccxt.pro: chỉ emit khi có nến mới, giảm số lần gọi API
+        # Cheat: chỉ polling nến 1m, emit RSI cho các interval 1s, 15s, 30s, 1m với tần suất khác nhau
         from rsi.controls.manager import ExchangeManager
         from rsi.appmanager.worker.qthreads import FastWorker
         import time
         import math
         manager = ExchangeManager()
         symbol = self.token_name
-        exchange_name = self.exchange  # exchange_id là tên sàn: 'binance', 'bybit', ...
+        exchange_name = self.exchange
         interval = self.interval
         exchange = manager.get_ccxt_instance(exchange_name)
 
@@ -55,85 +55,85 @@ class CardMonitorWidget(QFrame):
         def is_valid_rsi(rsi):
             return rsi is not None and isinstance(rsi, (int, float)) and not math.isnan(rsi) and not math.isinf(rsi)
 
-        def fetch_and_calc_rsi(setdata=None):
-            last_candle_ts = None
+        def fetch_and_cheat_emit(setdata=None):
             closes = []
             first_fetch = True
             period = 14
             closes_max = period * 5
+            t0 = time.time()
+            last_values = {'1s': '--', '15s': '--', '30s': '--', '1m': '--'}
+            first_rsi_emitted = False
+            last_candle_closed_ts = None
             try:
-                first_loop = True
                 while self._is_running:
                     try:
+                        candles = exchange.fetch_ohlcv(symbol, timeframe='1m', limit=2)
+                        if not candles or len(candles) < 2:
+                            time.sleep(1)
+                            continue
                         if first_fetch:
-                            candles = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=1000)
+                            candles_hist = exchange.fetch_ohlcv(symbol, timeframe='1m', limit=150)
+                            closes = [c[4] for c in candles_hist]
                             first_fetch = False
-                            closes = [c[4] for c in candles]  # lấy toàn bộ 1000 closes để warm-up
-                            #print(f"Raw candles: {candles[-20:]}")  # In 20 nến gần nhất
-                            #print(f"Extracted closes: {closes[-20:]}")
-                            #print(f"Valid closes check: len={len(closes)}, all_same={all(c == closes[0] for c in closes)}")
-                            if len(closes) < period:
-                                time.sleep(2)
-                                continue
-                            last_candle_ts = candles[-1][0]
-                            if not is_valid_closes(closes):
-                                if setdata:
-                                    setdata.emit('--')
-                            else:
-                                from rsi.controls.indicator import RSIIndicator
-                                rsi = RSIIndicator(period).calculate(closes)
-                                print(f"RSI calculated: {rsi}")
-                                if is_valid_rsi(rsi) and setdata:
-                                    setdata.emit(rsi)
-                            # Lần đầu tiên: update xong là break ra khỏi vòng lặp để vào sleep đồng bộ
-                            first_loop = False
+                        prev_candle, last_candle = candles[-2], candles[-1]
+                        # Nếu có nến mới đã đóng
+                        new_candle_closed = (last_candle_closed_ts is None) or (prev_candle[0] != last_candle_closed_ts)
+                        if new_candle_closed:
+                            last_candle_closed_ts = prev_candle[0]
+                            closes.append(prev_candle[4])
+                            if len(closes) > closes_max:
+                                closes = closes[-closes_max:]
+                        # Luôn update close cuối cùng bằng close của nến hiện tại (realtime)
+                        if closes:
+                            closes[-1] = last_candle[4]
+                        # Tính RSI
+                        from rsi.controls.indicator import RSIIndicator
+                        if is_valid_closes(closes):
+                            rsi = RSIIndicator(period).calculate(closes)
                         else:
-                            candles = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=2)
-                            if not candles or len(candles) < 2:
-                                time.sleep(2)
-                                continue
-                            prev_candle, last_candle = candles[-2], candles[-1]
-                            if last_candle[0] != last_candle_ts:
-                                last_candle_ts = last_candle[0]
-                                closes.append(last_candle[4])
-                                if len(closes) > closes_max:
-                                    closes.pop(0)
-                                print(f"Raw candles: {candles}")
-                                print(f"Extracted closes: {closes}")
-                                print(f"Valid closes check: len={len(closes)}, all_same={all(c == closes[0] for c in closes)}")
-                                if is_valid_closes(closes):
-                                    from rsi.controls.indicator import RSIIndicator
-                                    rsi = RSIIndicator(period).calculate(closes)
-                                    print(f"RSI calculated: {rsi}")
-                                    if is_valid_rsi(rsi) and setdata:
-                                        setdata.emit(rsi)
-                                # Nếu không hợp lệ, không emit gì cả
+                            rsi = '--'
+                        now = time.time()
+                        elapsed = int(now - t0)
+                        emit_dict = {}
+                        # Lần đầu tiên: emit cho cả 4 dòng
+                        if not first_rsi_emitted and rsi != '--':
+                            for k in ['1s', '15s', '30s', '1m']:
+                                emit_dict[k] = rsi
+                                last_values[k] = rsi
+                            first_rsi_emitted = True
+                        else:
+                            # 1s, 15s, 30s: realtime
+                            emit_dict['1s'] = rsi
+                            last_values['1s'] = rsi
+                            if elapsed % 15 == 0:
+                                emit_dict['15s'] = rsi
+                                last_values['15s'] = rsi
                             else:
-                                time.sleep(1)
-                                continue
-                        # Sau lần đầu, sleep đến mốc nến tiếp theo
-                        now = int(time.time() * 1000)
-                        candle_ms = last_candle_ts
-                        tf_sec = 60  # default 1m
-                        if isinstance(interval, str):
-                            if interval.endswith('s'):
-                                tf_sec = int(interval[:-1])
-                            elif interval.endswith('m'):
-                                tf_sec = int(interval[:-1]) * 60
-                        # Tính mốc nến tiếp theo chuẩn
-                        next_candle_time = ((candle_ms // (tf_sec * 1000)) + 1) * (tf_sec * 1000)
-                        sleep_time = max(1, (next_candle_time - now) // 1000)
-                        time.sleep(sleep_time)
+                                emit_dict['15s'] = last_values['15s']
+                            if elapsed % 30 == 0:
+                                emit_dict['30s'] = rsi
+                                last_values['30s'] = rsi
+                            else:
+                                emit_dict['30s'] = last_values['30s']
+                            # 1m: chỉ cập nhật khi nến đã đóng
+                            if new_candle_closed:
+                                emit_dict['1m'] = rsi
+                                last_values['1m'] = rsi
+                            else:
+                                emit_dict['1m'] = last_values['1m']
+                        if setdata:
+                            setdata.emit(emit_dict)
+                        time.sleep(1)
                     except Exception as e:
                         print(f"[Card] Lỗi fetch_ohlcv {exchange_name} {symbol}: {e}")
                         if setdata:
-                            setdata.emit('--')
+                            setdata.emit({'1s': '--', '15s': '--', '30s': '--', '1m': '--'})
                         time.sleep(2)
             except Exception as e:
                 print(f"[Card] Lỗi polling thread: {e}")
 
-        self.rsi_worker = FastWorker(self, fetch_and_calc_rsi)
-        self.rsi_worker.signals.setdata.connect(lambda value: self.update_rsi({'1m': value}))
+        self.rsi_worker = FastWorker(self, fetch_and_cheat_emit)
+        self.rsi_worker.signals.setdata.connect(self.update_rsi)
         self.rsi_worker.start_thread()
 
     def _on_rsi_update(self, value):
@@ -209,6 +209,9 @@ class CardMonitorWidget(QFrame):
         self.deleteLater()
 
     def update_rsi(self, rsi_dict):
+        # Đảm bảo luôn là dict (nếu worker emit 1 giá trị thì wrap lại)
+        if not isinstance(rsi_dict, dict):
+            rsi_dict = {'1m': rsi_dict}
         # Cập nhật giá trị RSI cho card, chỉ update các mốc có trong dict
         for k, v in rsi_dict.items():
             self.rsi_dict[k] = v

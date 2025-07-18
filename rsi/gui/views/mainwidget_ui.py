@@ -207,7 +207,7 @@ class Ui_MainWidget(object):
         # Thêm label hiển thị giá trị RSI
         self.rsiLabel = QLabel(self.chartframe)
         self.rsiLabel.setObjectName("rsiLabel")
-        self.rsiLabel.setText("RSI: --")
+        self.rsiLabel.setText("RSI Monitor")
         self.rsiLabel.setStyleSheet("color: #FFD700; font-size: 18px; font-weight: bold;")
         self.rsiLabel.setAlignment(Qt.AlignCenter)
         self.verticalLayout_9.addWidget(self.rsiLabel)

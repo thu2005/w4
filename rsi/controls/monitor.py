@@ -4,7 +4,7 @@ from .indicator import RSIIndicator
 import time
 
 class RSIMonitorWorker(QObject):
-    rsi_updated = Signal(float)
+    rsi_updated = Signal(dict)  # {interval: value}
     error = Signal(str)
 
     def __init__(self, ws, symbol, interval):
@@ -19,53 +19,57 @@ class RSIMonitorWorker(QObject):
 
     def run(self):
         print(f"[RSIMonitor] Bắt đầu monitor (QThread): {self.symbol} | Interval: {self.interval}")
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            all_candles = loop.run_until_complete(self.ws.fetch_ohlcv(self.symbol, timeframe=self.interval, limit=100))
-            closes = [c[4] for c in all_candles]
-            print(f"[RSIMonitor] Đã lấy {len(closes)} nến lịch sử cho {self.symbol}")
-        except Exception as e:
-            print(f"[RSIMonitor] Lỗi khi fetch_ohlcv: {e}")
-            self.error.emit(str(e))
-            return
+        ws = self.ws
+        symbol = self.symbol
+        interval = self.interval
+        import time
+        closes = []
+        last_update = {"1s": 0, "15s": 0, "30s": 0, "1m": 0}
         while self._running:
             try:
-                new_candles = loop.run_until_complete(self.ws.watch_ohlcv(self.symbol, timeframe=self.interval))
-                print(f"[RSIMonitor] Nhận {len(new_candles)} nến mới cho {self.symbol}")
-                for candle in new_candles:
-                    is_new_candle_formed = candle[0] > all_candles[-1][0]
-                    if is_new_candle_formed:
-                        closes.append(candle[4])
-                        if len(closes) > 14:
-                            rsi = RSIIndicator(14).calculate(closes)
-                            self.rsi_updated.emit(rsi)
-                            print(f"[RSIMonitor] RSI cập nhật: {rsi} | Token: {self.symbol} | Interval: {self.interval}")
-                        all_candles.append(candle)
-                        if len(closes) > 500:
-                            closes.pop(0)
-                            all_candles.pop(0)
-                    elif candle[0] == all_candles[-1][0]:
-                        all_candles[-1] = candle
-                        closes[-1] = candle[4]
+                candles = ws.fetch_ohlcv(symbol, timeframe=interval, limit=100)
+                closes = [c[4] for c in candles]
+                now = int(time.time())
+                rsi_dict = {}
+                # RSI 1s: update mỗi lần polling
+                if len(closes) > 14:
+                    rsi_dict["1s"] = RSIIndicator(14).calculate(closes)
+                # RSI 15s: update mỗi 15s
+                if now - last_update["15s"] >= 15:
+                    if len(closes) > 14:
+                        rsi_dict["15s"] = RSIIndicator(14).calculate(closes)
+                    last_update["15s"] = now
+                # RSI 30s: update mỗi 30s
+                if now - last_update["30s"] >= 30:
+                    if len(closes) > 14:
+                        rsi_dict["30s"] = RSIIndicator(14).calculate(closes)
+                    last_update["30s"] = now
+                # RSI 1m: update mỗi 60s
+                if now - last_update["1m"] >= 60:
+                    if len(closes) > 14:
+                        rsi_dict["1m"] = RSIIndicator(14).calculate(closes)
+                    last_update["1m"] = now
+                if rsi_dict:
+                    self.rsi_updated.emit(rsi_dict)
                 time.sleep(1)
             except Exception as e:
-                print(f"[RSIMonitor] Lỗi khi watch_ohlcv: {e}")
+                print(f"[RSIMonitor] Lỗi fetch_ohlcv {symbol} {interval}: {e}")
                 self.error.emit(str(e))
                 time.sleep(5)
-        if hasattr(self.ws, 'close'):
-            loop.run_until_complete(self.ws.close())
 
 class RSIMonitor:
     def __init__(self, ws, symbol, interval, on_rsi_update=None):
         self.worker = RSIMonitorWorker(ws, symbol, interval)
         self.thread = QThread()
         self.worker.moveToThread(self.thread)
-        self.worker.rsi_updated.connect(on_rsi_update)
+        self.on_rsi_update = on_rsi_update
+        self.worker.rsi_updated.connect(self._on_rsi_update)
         self.worker.error.connect(self.handle_error)
         self.thread.started.connect(self.worker.run)
-        self.on_rsi_update = on_rsi_update
+
+    def _on_rsi_update(self, rsi_dict):
+        if self.on_rsi_update:
+            self.on_rsi_update(rsi_dict)
 
     def start(self):
         self.thread.start()
